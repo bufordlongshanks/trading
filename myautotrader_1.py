@@ -6,7 +6,7 @@ from typing import List
 from ready_trader_go import BaseAutoTrader, Instrument, Lifespan, MAXIMUM_ASK, MINIMUM_BID, Side
 
 POSITION_LIMIT = 100
-ORDER_LOT = 25
+ORDER_LOT = 60
 TICK_SIZE_IN_CENTS = 100
 TAKER_FEE = 0.0002
 MAKER_FEE = -0.0001
@@ -62,7 +62,6 @@ class AutoTrader(BaseAutoTrader):
         self.logger.info("received order book for instrument %d with sequence number %d", instrument,
                          sequence_number)
         if instrument == Instrument.FUTURE:
-            
             fut_bid_price = bid_prices[0] 
             fut_ask_price = ask_prices[0]
             self.fut_bid_vol = bid_volumes[0]
@@ -74,34 +73,50 @@ class AutoTrader(BaseAutoTrader):
             self.min_PAS_ask = fut_ask_price*(1+MAKER_FEE)
 
         if instrument == Instrument.ETF:
+            
+            
             if ask_prices[0]<self.max_FAK_ask and ask_prices[0]>0:
                 if self.ask_id != 0:
                         self.send_cancel_order(self.ask_id)
-                vol = min(MAX_LOT, ask_volumes[0], POSITION_LIMIT - self.position - ORDER_LOT)
+                vol = min(MAX_LOT, ask_volumes[0], int(POSITION_LIMIT - self.position - ORDER_LOT))
                 if vol > 0:
                     self.FAK_bid_id = next(self.order_ids)
                     self.send_insert_order(self.FAK_bid_id, Side.BUY, ask_prices[0], vol, Lifespan.FILL_AND_KILL)
                     self.FAK_bids.add(self.FAK_bid_id)
+
             elif bid_prices[0]>self.min_FAK_bid:
                 if self.bid_id != 0:
                         self.send_cancel_order(self.bid_id)
-                vol = min(MAX_LOT, bid_volumes[0], POSITION_LIMIT + self.position - ORDER_LOT)
+                vol = min(MAX_LOT, bid_volumes[0], int(POSITION_LIMIT + self.position - ORDER_LOT))
                 if vol > 0:
                     self.FAK_ask_id = next(self.order_ids)
                     self.send_insert_order(self.FAK_ask_id, Side.SELL, bid_prices[0], vol, Lifespan.FILL_AND_KILL)
                     self.FAK_asks.add(self.FAK_ask_id)
-            elif self.max_PAS_bid>bid_prices[0]+TICK_SIZE_IN_CENTS:
+
+            if self.max_PAS_bid>bid_prices[0]+TICK_SIZE_IN_CENTS:
                 bid_price = bid_prices[0]+TICK_SIZE_IN_CENTS
-                if bid_price != self.bid_price:
+                if bid_price != self.bid_price and self.buy_order_size>0:
                     if self.bid_id != 0:
                         self.send_cancel_order(self.bid_id)
                     self.bid_price = bid_price
                     self.bid_id = next(self.order_ids)
                     self.send_insert_order(self.bid_id, Side.BUY, self.bid_price, self.buy_order_size, Lifespan.GOOD_FOR_DAY)
                     self.bids.add(self.bid_id)
-            elif self.min_PAS_ask < ask_prices[0]-TICK_SIZE_IN_CENTS:
+
+            else:
+                bid_price = int(self.max_PAS_bid//TICK_SIZE_IN_CENTS  * TICK_SIZE_IN_CENTS)
+
+                if bid_price != self.bid_price and self.max_PAS_bid != 0 and self.buy_order_size>0:
+                    if self.bid_id != 0:
+                        self.send_cancel_order(self.bid_id)
+                    self.bid_price = bid_price
+                    self.bid_id = next(self.order_ids)
+                    self.send_insert_order(self.bid_id, Side.BUY, self.bid_price, self.buy_order_size, Lifespan.GOOD_FOR_DAY)
+                    self.bids.add(self.bid_id)
+
+            if self.min_PAS_ask < ask_prices[0]-TICK_SIZE_IN_CENTS:
                 ask_price = ask_prices[0] - TICK_SIZE_IN_CENTS
-                if ask_price != self.ask_price:
+                if ask_price != self.ask_price and self.sell_order_size>0:
                     if self.ask_id != 0:
                         self.send_cancel_order(self.ask_id)
                     self.ask_price = ask_price
@@ -110,36 +125,18 @@ class AutoTrader(BaseAutoTrader):
                     self.asks.add(self.ask_id)
             else:
                 ask_price = int((self.min_PAS_ask + TICK_SIZE_IN_CENTS) //TICK_SIZE_IN_CENTS  * TICK_SIZE_IN_CENTS)
-    
-                bid_price = int(self.max_PAS_bid//TICK_SIZE_IN_CENTS  * TICK_SIZE_IN_CENTS)
-                
-                if ask_price != self.ask_price and self.min_PAS_ask != 0:
+                if ask_price != self.ask_price and self.min_PAS_ask != 0 and self.sell_order_size>0:
                     if self.ask_id != 0:
                         self.send_cancel_order(self.ask_id)
                     self.ask_price = ask_price
                     self.ask_id = next(self.order_ids)
                     self.send_insert_order(self.ask_id, Side.SELL, self.ask_price, self.sell_order_size, Lifespan.GOOD_FOR_DAY)
-                   
                     self.asks.add(self.ask_id)
-                if bid_price != self.bid_price and self.max_PAS_bid != 0:
-                    if self.bid_id != 0:
-                        self.send_cancel_order(self.bid_id)
-                    self.bid_price = bid_price
-                    self.bid_id = next(self.order_ids)
-                    self.send_insert_order(self.bid_id, Side.BUY, self.bid_price, self.buy_order_size, Lifespan.GOOD_FOR_DAY)
-                    
-                    self.bids.add(self.bid_id)
+
+                
 
                 
                 
-                    
-                
-
-            
-            
-
-
-
     def on_order_filled_message(self, client_order_id: int, price: int, volume: int) -> None:
         """Called when one of your orders is filled, partially or fully.
 
@@ -156,8 +153,15 @@ class AutoTrader(BaseAutoTrader):
             self.position -= volume
             self.send_hedge_order(next(self.order_ids), Side.BID, MAX_ASK_NEAREST_TICK, volume)
         
-        self.sell_order_size = min(ORDER_LOT, int(self.position + POSITION_LIMIT))
-        self.buy_order_size = min(ORDER_LOT, int(POSITION_LIMIT - self.position))
+        sell_order_size = min(ORDER_LOT, int(self.position + POSITION_LIMIT))
+        if sell_order_size < self.sell_order_size and self.ask_id != 0:
+            self.send_amend_order(self.ask_id, sell_order_size)
+        self.sell_order_size = sell_order_size
+        buy_order_size = min(ORDER_LOT, int(POSITION_LIMIT - self.position))
+        if buy_order_size < self.buy_order_size and self.bid_id != 0:
+            self.send_amend_order(self.bid_id, buy_order_size)  
+        self.buy_order_size = buy_order_size
+
     def on_order_status_message(self, client_order_id: int, fill_volume: int, remaining_volume: int,
                                 fees: int) -> None:
         """Called when the status of one of your orders changes.
